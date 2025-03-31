@@ -1,213 +1,142 @@
 import streamlit as st
 import os
-import sqlite3
-import json
+# import sqlite3 # No longer needed directly here
+# import json # No longer needed directly here
 import platform
 from pathlib import Path
 from collections import defaultdict
 import traceback
+import chat_utils # Add this line near the top
 
-# --- Core Data Loading Functions (Adapted from previous script) ---
+# --- Core Data Loading Functions ---
 
-def get_cursor_storage_path():
-    """Determines the path to Cursor's workspaceStorage based on the OS."""
-    system = platform.system()
-    # ... (Keep the exact implementation from cursor_chat_viewer.py) ...
-    if system == "Darwin":
-        return Path.home() / "Library/Application Support/Cursor/User/workspaceStorage"
-    elif system == "Windows":
-        appdata = os.getenv('APPDATA')
-        if appdata:
-            return Path(appdata) / "Cursor/User/workspaceStorage"
-        else:
-            st.error("Error: APPDATA environment variable not found.")
-            return None
-    elif system == "Linux":
-         config_path = Path.home() / ".config/Cursor/User/workspaceStorage"
-         if config_path.exists():
-             return config_path
-         # Add other potential Linux paths if needed
-         st.warning("Warning: Could not automatically determine Cursor storage path on Linux.")
-         return None
-    else:
-        st.error(f"Error: Unsupported operating system: {system}")
-        return None
+# REMOVE the old load_all_chat_data function (lines 17-67)
 
-def find_database_files(storage_path):
-    """Finds all state.vscdb files within workspace storage subdirectories."""
-    db_files = []
-    if not storage_path or not storage_path.is_dir():
-        # Error already handled by get_cursor_storage_path usually
-        return db_files
-    try:
-        for item in storage_path.iterdir():
-            if item.is_dir() and len(item.name) > 10 and item.name != "images":
-                 db_path = item / "state.vscdb"
-                 if db_path.is_file():
-                     db_files.append(db_path)
-    except Exception as e:
-        st.error(f"Error scanning storage path '{storage_path}': {e}")
-    return db_files
-
-def query_chat_data(db_path):
-    """Queries a single database file for chat history, parsing the known structure."""
-    chats = []
-    try:
-        conn = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
-        cursor = conn.cursor()
-        query = """
-        SELECT key, value
-        FROM ItemTable
-        WHERE key = 'workbench.panel.aichat.view.aichat.chatdata'
-        """
-        cursor.execute(query)
-        rows = cursor.fetchall()
-        conn.close()
-
-        if not rows: return []
-
-        for i, (db_key, row_value) in enumerate(rows):
-            try:
-                data = json.loads(row_value)
-                if not isinstance(data, dict): continue
-                tabs = data.get('tabs')
-                if not isinstance(tabs, list): continue
-
-                for tab_index, tab_data in enumerate(tabs):
-                    if not isinstance(tab_data, dict): continue
-                    tab_id = tab_data.get('tabId', f'unknown_tab_{tab_index}')
-                    chat_title = tab_data.get('chatTitle', f'Untitled Chat {tab_index}')
-                    bubbles = tab_data.get('bubbles')
-                    if not isinstance(bubbles, list): continue
-
-                    for bubble_index, bubble_data in enumerate(bubbles):
-                        if not isinstance(bubble_data, dict): continue
-                        role = bubble_data.get('type', 'unknown')
-                        content = bubble_data.get('text')
-                        if content is None: continue
-                        if role == 'ai': role = 'assistant'
-                        content_str = str(content)
-                        if content_str.strip() in ('{}', '[]', ''): continue
-                        chats.append({
-                            "role": str(role),
-                            "content": content_str,
-                            "tabId": str(tab_id),
-                            "chatTitle": str(chat_title),
-                            "source_db": db_path.parent.name
-                        })
-            except json.JSONDecodeError:
-                # st.warning(f"Could not decode JSON in {db_path.parent.name} (key: {db_key})")
-                pass # Ignore decode errors for now
-            except Exception as e:
-                 # st.warning(f"Error processing structure in {db_path.parent.name}: {e}")
-                 pass # Ignore other processing errors for now
-
-    except sqlite3.OperationalError as e:
-        if "no such table: ItemTable" in str(e): pass
-        elif "database is locked" in str(e):
-             st.warning(f"DB locked: {db_path.parent.name}. Try closing Cursor?")
-        else: st.warning(f"SQLite error in {db_path.parent.name}: {e}")
-    except Exception as e:
-        st.error(f"Failed to read DB {db_path.parent.name}: {e}")
-
-    return chats
-
-@st.cache_data # Cache the data loading process
-def load_all_chat_data():
-    storage_path = get_cursor_storage_path()
-    if not storage_path:
-        return None, 0, 0 # Indicate error
-
-    db_files = find_database_files(storage_path)
-    if not db_files:
-        st.info("No state.vscdb files found in Cursor workspace storage.")
-        return {}, 0, 0
-
-    st.write(f"Found {len(db_files)} potential database file(s). Scanning...")
-
-    all_chats = []
-    progress_bar = st.progress(0)
-    for i, db_path in enumerate(db_files):
-        try:
-            all_chats.extend(query_chat_data(db_path))
-        except Exception as e:
-            st.error(f"Error processing {db_path}: {e}")
-            st.code(traceback.format_exc())
-        progress_bar.progress((i + 1) / len(db_files))
-
-    # Group chats by session (source_db + tabId)
-    sessions = defaultdict(list)
-    for chat in all_chats:
-        session_key = (chat['source_db'], chat['tabId'])
-        sessions[session_key].append(chat)
-
-    total_messages = len(all_chats)
-    total_sessions = len(sessions)
-
-    return sessions, total_messages, total_sessions
+# Add the new wrapper function with caching
+@st.cache_data
+def load_data_wrapper():
+     try:
+         # sessions_data, total_messages, total_sessions = load_all_chat_data() # Old call
+         sessions_data, file_histories = chat_utils.load_all_workspace_data() # New call
+         total_messages = sum(len(chats) for chats in sessions_data.values())
+         total_sessions = len(sessions_data)
+         return sessions_data, file_histories, total_messages, total_sessions
+     except FileNotFoundError as e:
+          st.error(str(e))
+          return None, None, 0, 0
+     except Exception as e:
+          st.error(f"An unexpected error occurred during data loading: {e}")
+          st.code(traceback.format_exc()) # Show details if something else goes wrong
+          return None, None, 0, 0
 
 # --- Streamlit App UI ---
 
 st.set_page_config(page_title="Cursor Chat Viewer", layout="wide")
 st.title("🔎 Cursor Chat History Viewer")
 
-# Load data using the cached function
-with st.spinner("Loading chat history from database files..."):
-    sessions_data, total_messages, total_sessions = load_all_chat_data()
+# Load data using the wrapper
+with st.spinner("Loading history from database files..."):
+    # sessions_data, total_messages, total_sessions = load_all_chat_data() # Old call
+    sessions_data, file_histories, total_messages, total_sessions = load_data_wrapper() # New call
 
-if sessions_data is None: # Error during path finding
-    st.stop()
+if sessions_data is None: # Error occurred during loading
+     st.stop()
 
 st.write(f"Parsed **{total_messages}** messages across **{total_sessions}** unique chat sessions.")
+st.write(f"Found file history for **{len(file_histories)}** workspaces.") # Add this line
 
-if not sessions_data:
-    st.info("No chat sessions found in the scanned databases.")
+if not sessions_data and not file_histories: # Check if anything was loaded
+    st.info("No chat sessions or file history found in the scanned databases.")
     st.stop()
 
-# Prepare session list for display
+# Prepare session list for display (Check if sessions_data could be empty but file_histories exist)
 session_list_for_display = []
 session_map = {}
-# Sort sessions for consistent display (e.g., by source then title)
-sorted_session_keys = sorted(sessions_data.keys(), key=lambda k: (k[0], sessions_data[k][0].get('chatTitle', 'Untitled Chat')))
+if sessions_data:
+    # Sort sessions for consistent display (e.g., by source then title)
+    sorted_session_keys = sorted(sessions_data.keys(), key=lambda k: (k[0], sessions_data[k][0].get('chatTitle', 'Untitled Chat')))
 
-for i, key in enumerate(sorted_session_keys):
-    chats = sessions_data[key]
-    if chats:
-        title = chats[0].get('chatTitle', 'Untitled Chat')
-        num_messages = len(chats)
-        source = key[0]
-        display_name = f"{i+1}. {title} ({num_messages} messages) [{source}]"
-        session_list_for_display.append(display_name)
-        session_map[display_name] = key # Map display name back to key
+    for i, key in enumerate(sorted_session_keys):
+        chats = sessions_data[key]
+        if chats:
+            title = chats[0].get('chatTitle', 'Untitled Chat')
+            num_messages = len(chats)
+            source = key[0]
+            display_name = f"{i+1}. {title} ({num_messages} messages) [{source}]"
+            session_list_for_display.append(display_name)
+            session_map[display_name] = key # Map display name back to key
+else:
+    st.info("No chat sessions found, but file history might be available.")
 
 # Add placeholder option
 options = ["-- Select a Chat Session --"] + session_list_for_display
 
-selected_display_name = st.selectbox(
-    "Choose a chat session to view:",
-    options=options,
-    index=0 # Default to placeholder
-)
+# Only show select box if there are sessions
+if session_list_for_display:
+    selected_display_name = st.selectbox(
+        "Choose a chat session to view:",
+        options=options,
+        index=0 # Default to placeholder
+    )
+else:
+    selected_display_name = "-- Select a Chat Session --" # Ensure variable exists
+    st.write("No chat sessions available to select.")
 
 st.divider()
 
-# Display selected chat
+# Display selected chat and history
 if selected_display_name != "-- Select a Chat Session --":
-    selected_key = session_map[selected_display_name]
+    selected_key = session_map[selected_display_name] # key is (workspace_id, tabId)
     selected_session_chats = sessions_data[selected_key]
+    workspace_id = selected_key[0] # Get workspace ID from the key
 
     if selected_session_chats:
-        st.header(f"Chat: {selected_session_chats[0].get('chatTitle', 'Untitled Chat')}")
-        st.caption(f"Source: {selected_key[0]} | Tab ID: {selected_key[1]}")
-
-        for chat in selected_session_chats:
+         # Display chat header and messages - existing code
+         st.header(f"Chat: {selected_session_chats[0].get('chatTitle', 'Untitled Chat')}")
+         st.caption(f"Source: {workspace_id} | Tab ID: {selected_key[1]}")
+         for chat in selected_session_chats:
             role = chat.get('role', 'unknown')
             # Ensure role is one of the types st.chat_message expects, default to "assistant"
             if role not in ["user", "assistant"]:
                 role = "assistant"
             with st.chat_message(role):
                 st.markdown(chat.get('content', '[No Content]')) # Use markdown to render content (handles code blocks)
+
+         # --- Add File History Expander ---
+         st.divider()
+         with st.expander(f"View File History for Workspace '{workspace_id}'"):
+             history = file_histories.get(workspace_id)
+             if history:
+                 st.write(f"Found {len(history)} recent file entries:")
+                 # Display as a simple list, maybe reversed to show newest first?
+                 # Use dict.fromkeys to remove duplicates while preserving order (Python 3.7+)
+                 unique_history = list(dict.fromkeys(history))
+                 st.write(f"({len(unique_history)} unique files)")
+                 for filepath in reversed(unique_history):
+                     st.code(filepath, language=None) # Display file paths
+             else:
+                 st.info(f"No file history found or parsed for workspace '{workspace_id}'.")
+         # --- End File History Expander ---
+
     else:
+        # This case should ideally not happen if the session is in the selectbox
         st.write("This session appears to have no messages.")
-else:
-    st.info("Select a chat session from the dropdown above to view its messages.") 
+elif not session_list_for_display and file_histories:
+    # If no chats, but history exists, maybe offer to view history directly?
+    st.info("Select a workspace below to view its file history:")
+    workspace_options = ["-- Select Workspace --"] + sorted(list(file_histories.keys()))
+    selected_workspace = st.selectbox("Workspace File History:", options=workspace_options)
+    if selected_workspace != "-- Select Workspace --":
+         history = file_histories.get(selected_workspace)
+         if history:
+            st.write(f"Found {len(history)} recent file entries for '{selected_workspace}':")
+            unique_history = list(dict.fromkeys(history))
+            st.write(f"({len(unique_history)} unique files)")
+            for filepath in reversed(unique_history):
+                 st.code(filepath, language=None)
+         # No else needed, .get handles missing key
+elif not session_list_for_display and not file_histories:
+    # This case is handled earlier by st.stop()
+    pass
+else: # Placeholder selected or no sessions
+    st.info("Select a chat session from the dropdown above to view its messages and associated file history.") 
